@@ -57,6 +57,57 @@ void FirstPerson::toggle() {
     }
 }
 
+bool FirstPerson::hook_rotation(Vector3f direction) {
+
+
+    if (!m_enabled->value() || !will_be_used() || m_last_camera_type != app::ropeway::camera::CameraControlType::PLAYER)
+        return false;
+
+       auto& vr = VR::get();
+
+    if (!update_pointers())
+        return false;
+
+    m_rotating.x = -direction.x;
+  //  m_rotating.z = direction.y;
+
+    return true;
+}
+
+bool FirstPerson::smooth_move(Vector3f direction, bool running) {
+
+    
+    if (!m_enabled->value() || !will_be_used() || m_last_camera_type != app::ropeway::camera::CameraControlType::PLAYER || m_player_transform == nullptr)
+        return false;
+
+    auto& vr = VR::get();
+    if (!vr->is_hmd_active()) {
+        return false;
+    }
+
+    if (!m_smooth_locomotion->value())
+        return false;
+
+    if (!update_pointers())
+        return false;
+
+    if (is_jacked(m_player_transform))
+        return false;
+
+    float speed = glm::length(direction);
+    vector_normalize(direction);
+
+    auto mat = Matrix4x4f{sdk::get_transform_rotation(m_camera_system->mainCamera->ownerGameObject->transform)};
+    Vector4f dir = mat * Vector4f{direction.x, 0, -direction.y, 0};
+
+    m_steering.x = dir.x;
+    m_steering.z = dir.z;
+    m_stopped = false;
+
+    m_max_speed = speed * (running ? 2.f : 1.f);
+    return true;
+}
+
 std::optional<std::string> FirstPerson::on_initialize() {
     /*auto vignetteCode = utility::scan(g_framework->getModule().as<HMODULE>(), "8B 87 3C 01 00 00 89 83 DC 00 00 00");
 
@@ -105,6 +156,7 @@ void FirstPerson::on_draw_ui() {
     ImGui::Separator();
     ImGui::Text("VR Specific Settings");
 
+    m_smooth_locomotion->draw("Smooth Locomotion (VR)");
     m_smooth_xz_movement->draw("Smooth XZ Movement (VR)");
     m_smooth_y_movement->draw("Smooth Y Movement (VR)");
     m_roomscale->draw("Roomscale Movement (VR)");
@@ -180,6 +232,8 @@ void FirstPerson::on_draw_ui() {
 
     m_disable_light_source->draw("Disable Camera Light");
     m_hide_mesh->draw("Hide Joint Mesh");
+    m_hide_upper_body->draw("Hide Head And Neck");
+
 
     ImGui::SameLine();
     m_rotate_mesh->draw("Force Rotate Joint");
@@ -519,6 +573,8 @@ void FirstPerson::on_pre_late_update_behavior(void* entry) {
 
 void FirstPerson::on_pre_unlock_scene(void* entry) {
     update_player_roomscale(m_player_transform);
+    update_player_smooth_locomotion_vr(m_player_transform);
+    update_player_rotation_vr();
 }
 
 void FirstPerson::on_post_late_update_behavior(void* entry) {
@@ -639,6 +695,11 @@ void FirstPerson::reset() {
     m_last_controller_rotation = glm::quat{};
     m_last_controller_rotation_vr = glm::quat{};
     m_cached_bone_matrix = nullptr;
+    m_rotating = Vector4f{};
+    m_steering = Vector4f{};
+    m_velocity = Vector4f{};
+    m_looking_at = Vector4f{};
+    m_stopped = true;
 
     std::lock_guard _{ m_frame_mutex };
     m_attach_names.clear();
@@ -1384,6 +1445,148 @@ void FirstPerson::update_player_body_rotation(RETransform* transform) {
 
     // Finally rotate the player transform to match the camera in a two-dimensional fashion
     transform->angles = *(Vector4f*)&camera_quat;
+
+
+}
+
+void FirstPerson::vector_normalize(Vector3f& vec) {
+
+    float len = glm::length(vec);
+    if (len != 0.f)
+        vector_scaleby(vec, 1.f / len);
+}
+
+void FirstPerson::vector_scaleby(Vector3f& vec, float scale) {
+
+    vec.x *= scale;
+    vec.y *= scale;
+    vec.z *= scale;
+}
+
+void FirstPerson::vector_zero(Vector3f& vec) {
+    vec.x = 0;
+    vec.y = 0;
+    vec.z = 0;
+}
+
+void FirstPerson::vector_truncate(Vector3f& vec, float max) {
+
+    float len = glm::length(vec);
+    if (len == 0.f)
+        return;
+
+    float i = max / len;
+    i = i < 1.0f ? i : 1.0f;
+    vector_scaleby(vec, i);
+}
+
+// (sibest): Smooth Locomotion implemented with a simple steering behaviour
+void FirstPerson::update_player_rotation_vr() {
+
+    const auto now = std::chrono::steady_clock::now();
+    const auto past = now - m_last_rotation_time;
+    m_last_rotation_time = now;
+
+
+    if (!m_enabled->value() || !will_be_used() || m_last_camera_type != app::ropeway::camera::CameraControlType::PLAYER) {
+        vector_zero(m_rotating);
+        return;
+    }
+
+    auto& vr = VR::get();
+    if (!update_pointers()) {
+        vector_zero(m_rotating);
+        return;
+    }
+
+    float len = glm::length(m_rotating);
+    Matrix4x4f dir_mat = glm::identity<Matrix4x4f>();
+
+    if (len > 0.1f) {
+
+        dir_mat = glm::lookAt(Vector3f{0.f, 0.f, 0.f}, m_rotating, Vector3f{0.f, 1.f, 0.f});
+        vector_scaleby(m_rotating, 0.25f);
+    } else {
+        vector_zero(m_rotating);
+    }
+
+    auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(past).count();
+    m_last_controller_rotation_vr = m_rotation_offset = Matrix4x4f{glm::slerp(
+     glm::quat{m_rotation_offset}, glm::quat{utility::math::remove_y_component(m_rotation_offset) * dir_mat}, millis * 0.001f)};
+
+    
+}
+
+// (sibest): Smooth Locomotion implemented with a simple steering behaviour
+void FirstPerson::update_player_smooth_locomotion_vr(RETransform* transform) {
+
+    const auto now = std::chrono::steady_clock::now();
+    const auto past = now - m_last_locomotion_time;
+    m_last_locomotion_time = now;
+    if (!m_smooth_locomotion->value())
+        return;
+
+    if (transform == nullptr) {
+        vector_zero(m_velocity);
+        m_stopped = true;
+        return;
+    }
+
+    if (!m_enabled->value() || !will_be_used() || m_last_camera_type != app::ropeway::camera::CameraControlType::PLAYER) {
+        vector_zero(m_velocity);
+        m_stopped = true;
+        return;
+    }
+
+    auto& vr = VR::get();
+    if (!vr->is_hmd_active()) {
+        vector_zero(m_velocity);
+        m_stopped = true;
+        return;
+    }
+
+    if (!update_pointers()) {
+        vector_zero(m_velocity);
+        m_stopped = true;
+        return;
+    }
+
+    if (is_jacked(transform)) {
+        vector_zero(m_velocity);
+        m_stopped = true;
+        return;
+    }
+
+    if (!m_stopped) {
+
+        auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(past).count();
+        float max_speed = millis / 800.f * m_max_speed;
+
+        m_velocity.x += m_steering.x * max_speed;
+        m_velocity.z += m_steering.z * max_speed;
+
+        vector_scaleby(m_steering, 0.5);
+        if (glm::length(m_steering) < 0.25f)
+            vector_zero(m_steering);
+
+        vector_truncate(m_velocity, max_speed);
+
+        if (glm::length(m_velocity) > 0) {
+
+            auto position = sdk::get_transform_position(transform);
+
+            position.x += m_velocity.x;
+            position.z += m_velocity.z;
+
+            sdk::set_transform_position(transform, position, true);
+
+            vector_scaleby(m_velocity, 0.8f);
+            if (glm::length(m_velocity) < 0.001f) {
+                vector_zero(m_velocity);
+                m_stopped = true;
+            }
+        }
+    }
 }
 
 void FirstPerson::update_player_roomscale(RETransform* transform) {
@@ -1820,6 +2023,38 @@ void FirstPerson::update_player_bones(RETransform* transform) {
         bone_matrix[0] = Vector4f{ 0.0f, 0.0f, 0.0f, 0.0f };
         bone_matrix[1] = Vector4f{ 0.0f, 0.0f, 0.0f, 0.0f };
         bone_matrix[2] = Vector4f{ 0.0f, 0.0f, 0.0f, 0.0f };
+    }
+
+    if (m_hide_upper_body->value()) {
+        std::vector<const wchar_t*> list({L"head", L"neck", L"trap", L"scapula", L"holster"});
+        auto joints = sdk::get_transform_joints(m_player_transform);
+
+        if (joints == nullptr) {
+            return;
+        }
+
+        for (auto i = 0; i < joints->size(); ++i) {
+            auto joint = (::REJoint*)joints->get_element(i);
+
+            if (joint == nullptr || joint->info == nullptr || joint->info->name == nullptr) {
+                continue;
+            }
+            auto name = std::wstring{joint->info->name};
+
+            for (const wchar_t* bone_name : list) {
+
+                if (name.find(bone_name) == std::wstring::npos)
+                    continue;
+
+                auto& bone_matrix = utility::re_transform::get_joint_matrix(*m_player_transform, name);
+                if (bone_matrix != utility::re_transform::invalid_matrix) {
+
+                    bone_matrix[0] = Vector4f{0.0f, 0.0f, 0.0f, 0.0f};
+                    bone_matrix[1] = Vector4f{0.0f, 0.0f, 0.0f, 0.0f};
+                    bone_matrix[2] = Vector4f{0.0f, 0.0f, 0.0f, 0.0f};
+                }
+            }
+        }
     }
 }
 
