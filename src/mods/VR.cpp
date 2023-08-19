@@ -3969,6 +3969,21 @@ void VR::openvr_input_to_re2_re3(REManagedObject* input_system) {
         // Override the left stick's axis values to the VR controller's values
         Vector3f axis{ left_axis.x, left_axis.y, 0.0f };
 
+	#if defined(RE2) || defined(RE3)
+	    
+	        bool running = is_action_active(m_action_joystick_click, m_left_joystick);
+	        if (FirstPerson::get()->smooth_move(axis, running)) {
+	
+	            if (running)
+	                set_button_state(app::ropeway::InputDefine::Kind::JOG1, false);
+	
+	            // Scale the axis movement force to allow sounds and animation
+	            axis.x *= 0.5f;
+	            axis.y *= 0.5f;
+	        }
+	#endif
+	    
+
         static auto update_method = sdk::get_object_method(lstick, "update");
         update_method->call<void*>(ctx, lstick, &axis, &axis);
     }
@@ -3978,6 +3993,15 @@ void VR::openvr_input_to_re2_re3(REManagedObject* input_system) {
 
         // Override the right stick's axis values to the VR controller's values
         Vector3f axis{ right_axis.x, right_axis.y, 0.0f };
+
+	#if defined(RE2) || defined(RE3)
+
+	        if (FirstPerson::get()->hook_rotation(axis)) {
+	
+	            // Scale the axis movement force to allow sounds and animation
+	
+	        }
+	#endif
 
         static auto update_method = sdk::get_object_method(rstick, "update");
         update_method->call<void*>(ctx, rstick, &axis, &axis);
