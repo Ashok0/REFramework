@@ -207,14 +207,10 @@ void CameraDuplicator::clone_camera() {
         return;
     }
 
-    auto old_camera_folder = old_camera_gameobject->folder;
-
-    if (old_camera_folder == nullptr) {
-        return;
-    }
-
     // Setting active to false lets us "activate" the folder again, cloning the camera perfectly
-    constexpr auto ACTIVE_OFFSET = sizeof(::REManagedObject) + 5;
+    // ADDENDUM: We don't do this anymore, and instead opt for manually recreating the components
+    // as it causes a bunch of issues like the game thinks the new camera is the main one and other things.
+    //constexpr auto ACTIVE_OFFSET = sizeof(::REManagedObject) + 5;
     //*(bool*)((uint8_t*)old_camera_folder + ACTIVE_OFFSET) = false;
     //sdk::call_object_func_easy<void*>(old_camera_folder, "activate");
 
@@ -243,18 +239,26 @@ void CameraDuplicator::clone_camera() {
 
     REComponent* component = old_camera_gameobject->transform->childComponent;
 
-    const std::unordered_set<std::string> illegal_components {
-        "app.worldtour.bWTCameraController", // this causes the camera to become the "main" camera which is NOT what we want, it breaks the real main camera
-        "app.ropeway.camera.MainCameraController", // also breaks the real main camera
-        "app.ropeway.camera.CameraSystem", // also breaks the real main camera
-        "app.bPostProcessController",
-        "app.MainCameraDestroyChecker",
+    std::unordered_set<std::string> illegal_components {
         "via.render.ExperimentalRayTrace",
         "via.motion.MotionCamera", // Unnecessarily takes control of the camera transform which we don't want
         "via.motion.ActorMotionCamera", // Unnecessarily takes control of the camera transform which we don't want
         "via.wwise.WwiseListener",
         // todo
     };
+
+    std::unordered_set<std::string> game_framework_components {
+        "worldtour.bWTCameraController", // this causes the camera to become the "main" camera which is NOT what we want, it breaks the real main camera
+        "camera.MainCameraController", // also breaks the real main camera
+        "camera.CameraSystem", // also breaks the real main camera
+        "bPostProcessController",
+        "MainCameraDestroyChecker",
+    };
+
+    // Add new components to illegal_components with the game project name prepended to the game_framework_components
+    for (auto& fwcomp : game_framework_components) {
+        illegal_components.insert(game_namespace((fwcomp)));
+    }
 
     while (component != nullptr) {
         const auto tdef = utility::re_managed_object::get_type_definition(component);
@@ -266,7 +270,7 @@ void CameraDuplicator::clone_camera() {
             continue;
         }
 
-        // 
+        // TODO: other game framework prefixes or maybe app is just okay?
         if (tdef->get_full_name().starts_with("app.")) {
             spdlog::info("Skipping app component {}", tdef->get_full_name());
             component = component->childComponent;
